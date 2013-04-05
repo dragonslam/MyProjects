@@ -1,0 +1,374 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Configuration;
+using System.Threading.Tasks;
+using log4net;
+using TweetSharp;
+
+using Biz.SN;
+using CMCoordi_SNS;
+using System.Collections;
+using System.Data;
+
+namespace CMCoordi_SNS
+{
+    class Twitter
+	{
+		// Logger
+		private static readonly log4net.ILog log = log4net.LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
+
+		// Twitter Token 정보 
+		private readonly string _consumerKey;
+		private readonly string _consumerSecret;
+		private readonly string _accessToken;
+		private readonly string _accessTokenSecret;
+
+		/// <summary>
+		/// Twitter Post
+		/// </summary>
+		public class TweetPost
+		{
+			public string post_id;
+			public string post_created_at;
+			public string post_text;
+
+			public string user_id;
+			public string user_screen_name;
+			public string user_name;
+		}
+
+		/// <summary>
+		/// 조회 결과를 저장할 Queue
+		/// </summary>
+		Queue<TweetPost> searchResultTweet = new Queue<TweetPost>();
+
+		// Twitter Constructor
+		public Twitter()
+		{
+		   // Token 정보 조회 
+			_consumerKey = ConfigurationManager.AppSettings["ConsumerKey"];
+			_consumerSecret = ConfigurationManager.AppSettings["ConsumerSecret"];
+			_accessToken = ConfigurationManager.AppSettings["AccessToken"];
+			_accessTokenSecret = ConfigurationManager.AppSettings["AccessTokenSecret"];
+		}
+
+		/// <summary>
+		/// Twitter의 Search API를 이용하여 데이터 조회 
+		/// </summary>
+		/// <param name="keywordId">관심주제Id</param>
+		/// <param name="keyword">관심주제</param>
+		/// <param name="maxPostId">최근 조회한 Twitter Post ID</param>
+		public void SearchTwitter(string keywordId, string keyword, string maxPostId)
+		{
+			int pageNumber = 1;
+			int numberPerPage = 100;
+			long sinceId = 0;
+			int tweetCount = 0;
+
+			log.Info("Keyword is " + keyword);
+
+			// 최근 조회한 Twitter Post Id
+			if (String.IsNullOrEmpty(maxPostId))
+				maxPostId = "0";
+
+			if (maxPostId.Length > 0)
+				sinceId = Int64.Parse(maxPostId);
+		   
+			try
+			{
+				// 트위터 서버 인증
+				var service = GetAuthenticatedService();
+
+				while (pageNumber < 16)
+				{
+					// Keyword와 관련된 글 조회 
+					var results = service.SearchSince(sinceId, keyword, pageNumber, numberPerPage);
+					tweetCount = 0;
+
+					if (results != null)
+					{
+						tweetCount = Convert.ToInt32(results.Statuses.Count().ToString());
+
+						if (tweetCount > 0)
+						{
+							foreach (var tweet in results.Statuses)
+							{
+								TweetPost t = new TweetPost();
+							  
+							   
+								t.post_id = tweet.Id.ToString();
+								t.post_created_at = tweet.CreatedDate.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
+								t.post_text = tweet.Text;
+
+								t.user_id = tweet.FromUserId.ToString();
+								t.user_name = tweet.FromUserName;
+								t.user_screen_name = tweet.FromUserScreenName;
+
+								this.enQueueResult(t);
+							}
+
+							pageNumber++;
+						}
+						else
+						{
+							break;
+						}
+					}
+					else
+					{
+						break;
+					}     
+				}
+
+				log.Info("keyword is " + keyword + " > Number of Search Result is " + this.searchResultTweet.Count.ToString());
+
+				// 조회 결과 관심글(Post) 저장
+				this.deQueueResult(keywordId);
+
+				log.Info("keyword is " + keyword + " > Complete Search");
+			}
+			catch (Exception ex)
+			{
+				log.Error("keyword is " + keyword + " > " + ex.ToString());
+			}
+		}
+
+		/// <summary>
+		/// 조회된 Post 건 별 Queue에 저장 
+		/// </summary>
+		/// <param name="t">조회된 Post</param>
+		public void enQueueResult(TweetPost t)
+		{
+			searchResultTweet.Enqueue(t);
+		}
+
+		/// <summary>
+		/// 전체 조회 결과를 관심글(Post) DB에 저장
+		/// <param name="keywordId">관심주제Id</param>
+		/// </summary>
+		public void deQueueResult(string keywordId)
+		{
+			Biz.SN.SNXmlAutoBizTx oBiz = null;
+			Hashtable ht = new Hashtable();
+			DataTable dtPost = new DataTable();
+	
+			try
+			{
+				oBiz = new SNXmlAutoBizTx();
+
+				// 추가 대상 컬럼 정의
+				dtPost.Columns.Add("SNSPOSTID");
+				dtPost.Columns.Add("KEYWORDID");
+				dtPost.Columns.Add("TITLE");
+				dtPost.Columns.Add("POSTDATE");
+				dtPost.Columns.Add("POSTUSERNM");
+				dtPost.Columns.Add("POSTUSERSCREENNM");
+				dtPost.Columns.Add("POSTUSERID");
+				dtPost.Columns.Add("POSTID");
+				dtPost.Columns.Add("POSTURL");
+				dtPost.Columns.Add("CONTENTS");
+				dtPost.Columns.Add("SESSIONUSERID");
+
+				foreach (TweetPost t in searchResultTweet)
+				{
+
+					DataRow dr = dtPost.NewRow();
+
+					dr["SNSPOSTID"]     = "0";
+					dr["KEYWORDID"]     = keywordId;
+                    dr["TITLE"] = t.post_text;
+					dr["POSTDATE"]      = t.post_created_at;
+					dr["POSTUSERNM"]    = t.user_name;
+					dr["POSTUSERSCREENNM"] = t.user_screen_name;
+					dr["POSTUSERID"]       = t.user_id;
+					dr["POSTID"] = t.post_id;
+					dr["POSTURL"] = "";
+					dr["CONTENTS"] = t.post_text;
+					dr["SESSIONUSERID"] = 1; // 시스템관리자
+
+					// 게시물 추가 
+					dtPost.Rows.Add(dr);
+
+				}
+
+				// 게시물 추가
+				if (dtPost.Rows.Count > 0)
+					oBiz.XmlTableExecute("uspSNSPostWrite", dtPost);
+
+				// 최근 조회한 관심글(Post)의 관심주제(Keyword) 최근조회한 관심글 ID 갱신
+				ht.Add("KEYWORDID", keywordId);
+
+				oBiz = new SNXmlAutoBizTx();
+				oBiz.XmlNonExecute("uspKeywordPostInfoWrite", ht);
+
+			}
+			catch (Exception ex)
+			{
+				log.Error("Twitter>deQueueResult> " + ex.ToString());
+			}
+			finally
+			{
+				if (oBiz != null)
+					oBiz = null;
+			}
+
+
+		}
+
+		/// <summary>
+		/// Twitter 검색 시작
+		/// </summary>
+		public void StartSearch()
+		{
+			Biz.SN.SNXmlAutoBiz oBiz = null;
+			DataSet dsKeywords = null;
+
+			try
+			{
+				// 조회 대상 키워드 조회
+				oBiz = new SNXmlAutoBiz();
+				dsKeywords = oBiz.GetData("uspKeywordList");
+				
+
+				#region    키워드 조회 Function
+					Func<object, int> action = (object oKeyword) =>
+					{
+						int result = 0;
+						string searchKeyword = "";
+						string keywordId = "";
+						string keyword = "";
+						string exceptKeyword = "";
+						string maxPostId = "";
+
+						DataRow k = (DataRow)oKeyword;
+
+						keywordId     = k["KeywordId"].ToString();
+						keyword       = k["Keyword"].ToString();
+						exceptKeyword = k["ExceptKeyword"].ToString();
+						maxPostId     = k["MaxPostId"].ToString();
+
+						// 수집 키워드
+						// 쉼표(,)를 기준으로 복수개의 관심주제어가 존재할 경우 처리 
+						// e.g. 넥서스7,nexus7
+						/*if (keyword.IndexOf(',') < 0)
+						{
+							searchKeyword = keyword.Trim();
+						}
+						else
+						{
+							string[] Skeywords = keyword.Split(',');
+							foreach (string sk in Skeywords)
+							{
+								searchKeyword += sk.Trim() + " OR ";
+							}
+
+							if (searchKeyword.Substring(searchKeyword.Length - 3, 3) == "OR ")
+								searchKeyword = searchKeyword.Substring(0, searchKeyword.Length - 3);
+						}
+						*/
+
+
+						// 포함할 키워드
+						if (!String.IsNullOrEmpty(keyword))
+						{
+							if (keyword.IndexOf(',') < 0)
+							{
+								searchKeyword += " '" + keyword.Trim() + "' ";
+							}
+							else
+							{
+								string[] Skeywords = keyword.Split(',');
+								foreach (string sk in Skeywords)
+								{
+									searchKeyword += " '" + sk.Trim() + "' OR ";
+								}
+
+								if (searchKeyword.Substring(searchKeyword.Length - 3, 3) == "OR ")
+									searchKeyword = searchKeyword.Substring(0, searchKeyword.Length - 3);
+							}
+						}
+						
+						// 제외할 키워드
+						if (!String.IsNullOrEmpty(exceptKeyword))
+						{
+							if (exceptKeyword.IndexOf(',') < 0)
+							{
+								searchKeyword += " -" + exceptKeyword.Trim() + " ";
+							}
+							else
+							{
+								string[] Skeywords = exceptKeyword.Split(',');
+								foreach (string sk in Skeywords)
+								{
+									searchKeyword += " -" + sk.Trim() + " ";
+								}
+
+							}
+						}
+
+						searchKeyword = searchKeyword.Replace("  ", " ");
+
+						// Keyword 검색
+						Twitter t = new Twitter();
+
+						t.SearchTwitter(keywordId, searchKeyword, maxPostId);
+
+						return result;
+					};
+				#endregion 키워드 조회 Function
+
+				#region    키워드 조회 Task
+
+					if (dsKeywords != null)
+					{
+						if (dsKeywords.Tables[0].Rows.Count > 0)
+						{
+							// 키워드 갯수 만큼 Task 생성하여 조회 
+							Task<int>[] tasks = new Task<int>[dsKeywords.Tables[0].Rows.Count];
+							int taskIdx = 0;
+
+							foreach (DataRow dr in dsKeywords.Tables[0].Rows)
+							{
+								tasks[taskIdx] = Task<int>.Factory.StartNew(action, dr);
+
+								taskIdx++;
+							}
+
+							Task.WaitAll(tasks);
+						}
+					}
+
+				#endregion 키워드 조회 Task
+			}
+			catch (Exception ex)
+			{
+				log.Error("Twitter>Start Search>" + ex.ToString());
+			}
+			finally
+			{
+				if (oBiz != null)
+					oBiz = null;
+			}
+		   
+
+
+		}
+
+		/// <summary>
+		/// Twitter 서비스 인증
+		/// </summary>
+		/// <returns></returns>
+		public TwitterService GetAuthenticatedService()
+		{
+			var service = new TwitterService(_consumerKey, _consumerSecret);
+			//service.TraceEnabled = true;
+			
+			service.AuthenticateWith(_accessToken, _accessTokenSecret);
+			
+			return service;
+		}
+
+	}
+}

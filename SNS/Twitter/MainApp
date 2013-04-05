@@ -1,0 +1,33 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Configuration;
+
+using TweetSharp;
+
+namespace CMCoordi_SNS
+{
+    class MainApp
+    {
+        // Logger
+        private static readonly log4net.ILog log = log4net.LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
+     
+        /// <summary>
+        /// Main
+        /// </summary>
+        /// <param name="args"></param>
+        static void Main(string[] args)
+        {  
+            // Tweeter Search
+            Twitter t = new Twitter();
+
+            log.Info("---------- START ----------");
+
+            t.StartSearch();
+
+            log.Info("---------- END ----------");
+   
+        }
+    }
+}
